@@ -69,7 +69,7 @@ if st.button("Generate Schedule") and names:
 
     for p in names:
         prev = prev_shift_map.get(p, "")
-        if prev == "C":
+        if prev in ["C","Night12"]:
             model.Add(vars[p, "A"] == 0)
         if prev in ["C", "Night12"]:
             model.Add(vars[p, "Day12"] == 0)
