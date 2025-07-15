@@ -2,6 +2,4 @@
 ortools
 python-docx
 pandas
-unstructured
-sentence-transformers
-huggingface-hub
+openpyxl
