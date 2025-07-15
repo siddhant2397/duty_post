@@ -1,7 +1,6 @@
 ﻿streamlit
-langchain
-faiss-cpu
-PyMuPDF
+ortools
+python-docx
 pandas
 unstructured
 sentence-transformers
