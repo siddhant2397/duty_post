@@ -1,3 +1,7 @@
+
+
+
+
 # --- Shift Scheduler with OR-Tools, Word Export, Excel Input, Weekly Constraints, Merging, and 12-Hour Fallback ---
 
 import pandas as pd
@@ -84,17 +88,21 @@ if st.button("Generate Schedule") and names:
             prior_n12 = weekly_counts[p]["Night12"]
             prior_d12 = weekly_counts[p]["Day12"]
 
-            total_night = prior_c + prior_n12
-            total_12hr = prior_d12 + prior_n12
+            total_night = model.NewIntVar(0, 7, f"total_night_{p}")
+            model.Add(total_night == prior_c + prior_n12 + vars[p, "C"] + vars[p, "Night12"])
+
+            total_12hr = model.NewIntVar(0, 7, f"total_12hr_{p}")
+            model.Add(total_12hr == prior_d12 + prior_n12 + vars[p, "Day12"] + vars[p, "Night12"])
+
+            model.Add(total_12hr <= 3)
 
             flag = model.NewBoolVar(f"exceeds_night_{p}")
-            model.Add(total_night + vars[p, "C"] + vars[p, "Night12"] <= 4).OnlyEnforceIf(flag.Not())
-            model.Add(flag == 1).OnlyEnforceIf(
-                total_night + vars[p, "C"] + vars[p, "Night12"] > 3
-            )
+            cond = model.NewBoolVar(f"night_gt3_{p}")
+            model.Add(total_night > 3).OnlyEnforceIf(cond)
+            model.Add(total_night <= 3).OnlyEnforceIf(cond.Not())
+            model.Add(flag == 1).OnlyEnforceIf(cond)
+            model.Add(flag == 0).OnlyEnforceIf(cond.Not())
             exceeds_night.append(flag)
-
-            model.Add(total_12hr + vars[p, "Day12"] + vars[p, "Night12"] <= 3)
 
         model.Add(sum(exceeds_night) <= max_4_allowed)
 
@@ -124,7 +132,6 @@ if st.button("Generate Schedule") and names:
     merged_set = set()
     if people_left < total_needed:
         for group in merged_groups:
-            # Replace original posts with merged post (keep highest priority)
             top_post = None
             for post in common_posts:
                 if post in group:
@@ -138,16 +145,16 @@ if st.button("Generate Schedule") and names:
                         merged_set.add(post)
                 post_needs[top_post] = ["A", "B", "C"]
 
-    # --- 4. If still not enough, convert lowest priority posts into 12-hour shifts (pair: Day12 + Night12) ---
-    flat_post_list = list(post_needs.items())[::-1]  # bottom priority first
+    # --- 4. Convert lowest priority posts into 12-hour shifts ---
+    flat_post_list = list(post_needs.items())[::-1]
     for post, shifts_needed in flat_post_list:
         if people_left >= len(shifts_needed):
-            continue  # no need to convert
+            continue
         if people_left >= 2:
             post_needs[post] = ["Day12", "Night12"]
             people_left -= 2
         else:
-            del post_needs[post]  # mark as unfilled
+            del post_needs[post]
 
     # --- 5. Assign remaining posts ---
     for post, shift_list in post_needs.items():
@@ -211,3 +218,4 @@ if st.button("Generate Schedule") and names:
         )
     else:
         st.error("Could not find a feasible schedule under the given constraints.")
+
