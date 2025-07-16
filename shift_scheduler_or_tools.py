@@ -2,7 +2,7 @@ import pandas as pd
 import streamlit as st
 from ortools.sat.python import cp_model
 from docx import Document
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 import io
 import random
 
@@ -47,7 +47,7 @@ if hist_file:
 def plan_shifts(names, common_posts, c_only_posts, merged_groups):
     total_people = len(names)
     used_people = len(c_only_posts)  # for C-only posts
-    post_plan = {}
+    post_plan = OrderedDict()
     shift_demand = defaultdict(int)
     merged_map = {}
     merged_set = set()
@@ -71,8 +71,8 @@ def plan_shifts(names, common_posts, c_only_posts, merged_groups):
         post_plan[p] = ["C"]
         shift_demand["C"] += 1
 
-    # Try 8-hour shifts for common posts, else 12-hr, else unfilled
-    for post in post_list[::-1]:  # bottom priority first
+    # Attempt to fill posts with 8h shifts, else convert to 12h, else leave vacant
+    for post in post_list:
         if used_people + 3 <= total_people:
             post_plan[post] = ["A", "B", "C"]
             shift_demand["A"] += 1
@@ -85,13 +85,13 @@ def plan_shifts(names, common_posts, c_only_posts, merged_groups):
             shift_demand["Night12"] += 1
             used_people += 2
         else:
-            post_plan[post] = []  # left unfilled
+            post_plan[post] = []  # vacant
 
     return shift_demand, post_plan
 
 # --- 3. SHIFT ASSIGNMENT ---
 def assign_shifts_with_ortools(names, shift_demand, prev_shift_map, weekly_counts):
-    random.shuffle(names)  # 🟢 Shuffle before model definition
+    random.shuffle(names)
     model = cp_model.CpModel()
     shifts = ["A", "B", "C", "Day12", "Night12", "Off"]
     shift_vars = {(p, s): model.NewBoolVar(f"{p}_{s}") for p in names for s in shifts}
@@ -161,16 +161,20 @@ if st.button("Generate Schedule") and names:
         doc.add_heading("Shift Schedule by Duty Post", 0)
 
         shifts_order = ["A", "B", "C", "Day12", "Night12"]
-        post_shift_map = defaultdict(lambda: {s: "" for s in shifts_order})
+        post_shift_map = OrderedDict()
+        vacant_posts = []
 
         shift_to_people = defaultdict(list)
         for p, s in shift_assignment.items():
             shift_to_people[s].append(p)
 
         for s in shift_to_people:
-            random.shuffle(shift_to_people[s])  # 🟢 Randomize assignment per shift
+            random.shuffle(shift_to_people[s])
 
         for post, shifts in post_plan.items():
+            post_shift_map[post] = {}
+            if not shifts:
+                vacant_posts.append(post)
             for s in shifts:
                 if shift_to_people[s]:
                     person = shift_to_people[s].pop()
@@ -179,8 +183,13 @@ if st.button("Generate Schedule") and names:
         for post in post_plan:
             doc.add_paragraph(post, style='Heading 2')
             for s in shifts_order:
-                if post_shift_map[post][s]:
+                if post_shift_map[post].get(s):
                     doc.add_paragraph(f"Shift {s}: {post_shift_map[post][s]}", style='List Bullet')
+
+        if vacant_posts:
+            doc.add_paragraph("\nUnfilled Posts (due to insufficient personnel):", style='Heading 2')
+            for vp in vacant_posts:
+                doc.add_paragraph(vp, style='List Bullet')
 
         buffer = io.BytesIO()
         doc.save(buffer)
