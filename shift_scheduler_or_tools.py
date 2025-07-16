@@ -59,14 +59,12 @@ def plan_shifts(names, common_posts, c_only_posts, merged_groups):
                 merged_map[p] = top
                 merged_set.add(p)
 
-    # Step 1: Reserve people for C-only posts
     used_people = 0
     for post in c_only_posts:
         post_plan[post] = ["C"]
         shift_demand["C"] += 1
         used_people += 1
 
-    # Step 2: Remove merged duplicates
     reduced_common = []
     seen = set()
     for post in common_posts:
@@ -77,35 +75,34 @@ def plan_shifts(names, common_posts, c_only_posts, merged_groups):
         reduced_common.append(post)
         seen.add(post)
 
-    # Step 3: Start with all 8-hour posts
+    # Initially assign all as 8-hour
     post_status = OrderedDict((p, ["A", "B", "C"]) for p in reduced_common)
 
-    # Step 4: Iteratively convert lowest-priority posts to 12-hr until feasible
     def required_people(post_dict):
-        count = 0
-        for shifts in post_dict.values():
-            if shifts == ["A", "B", "C"]:
-                count += 3
-            elif shifts == ["Day12", "Night12"]:
-                count += 2
-        return count
+        return sum(3 if v == ["A", "B", "C"] else 2 for v in post_dict.values())
+
+    posts = list(post_status.items())
+    index = len(posts) - 1
 
     while True:
         total_required = used_people + required_people(post_status)
         if total_required <= total_people:
             break
-        # Convert lowest-priority post to 12-hour
-        bottom = next(reversed(post_status))
-        if post_status[bottom] == ["A", "B", "C"]:
-            post_status[bottom] = ["Day12", "Night12"]
-            shift_demand["Day12"] += 1
-            shift_demand["Night12"] += 1
-            shift_demand["A"] -= 1 if shift_demand["A"] > 0 else 0
-            shift_demand["B"] -= 1 if shift_demand["B"] > 0 else 0
-            shift_demand["C"] -= 1 if shift_demand["C"] > 0 else 0
+        # Convert bottom post to 12-hour
+        while index >= 0:
+            post, shifts = posts[index]
+            if post_status[post] == ["A", "B", "C"]:
+                post_status[post] = ["Day12", "Night12"]
+                break
+            index -= 1
         else:
-            # Already 12-hour, so remove post
-            post_status.pop(bottom)
+            # All converted to 12-hour, now start removing posts
+            while True:
+                post, shifts = posts.pop()
+                post_status.pop(post)
+                total_required = used_people + required_people(post_status)
+                if total_required <= total_people:
+                    break
 
     for post, shifts in post_status.items():
         post_plan[post] = shifts
