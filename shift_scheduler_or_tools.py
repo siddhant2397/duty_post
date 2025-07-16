@@ -57,9 +57,7 @@ if st.button("Generate Schedule") and names:
     shift_vars = {(p, s): model.NewBoolVar(f"{p}_{s}") for p in names for s in shifts}
     assign_vars = {}
 
-    # Create full list of duty posts
     all_posts = c_only_posts + common_posts.copy()
-    # Merge posts if needed
     for group in merged_groups:
         top = next((p for p in common_posts if p in group), None)
         if top:
@@ -67,34 +65,26 @@ if st.button("Generate Schedule") and names:
                 if sub != top and sub in all_posts:
                     all_posts.remove(sub)
 
-    # Convert lowest priority to 12-hr if needed (skip now, fallback later)
-
-    # Create assignment vars (person, post, shift) only for real shifts (not Off)
     for p in names:
         for post in all_posts:
             for s in ["A", "B", "C", "Day12", "Night12"]:
                 assign_vars[p, post, s] = model.NewBoolVar(f"assign_{p}_{post}_{s}")
 
-    # Each person gets exactly one shift
     for p in names:
         model.AddExactlyOne(shift_vars[p, s] for s in shifts)
 
-    # Link assignment to shift
     for (p, post, s), var in assign_vars.items():
         model.Add(var <= shift_vars[p, s])
 
-    # Post filling constraints
     for post in c_only_posts:
         model.AddExactlyOne(assign_vars[p, post, "C"] for p in names if (p, post, "C") in assign_vars)
 
     for post in common_posts:
-        # Try 3 shifts: A, B, C
         for s in ["A", "B", "C"]:
             post_key = [assign_vars[p, post, s] for p in names if (p, post, s) in assign_vars]
             if post_key:
                 model.Add(sum(post_key) == 1)
 
-    # Weekly limits & previous shift constraints
     if weekly_counts:
         max_4_allowed = max(1, int(len(names) * 0.10))
         flags = []
@@ -124,7 +114,6 @@ if st.button("Generate Schedule") and names:
         assigned_posts = [var for (pp, post, s), var in assign_vars.items() if pp == p]
         model.Add(sum(assigned_posts) <= 1)
 
-    # Assign Off if not assigned
     for p in names:
         model.Add(shift_vars[p, "Off"] == 1).OnlyEnforceIf([
             shift_vars[p, "A"].Not(),
@@ -134,7 +123,6 @@ if st.button("Generate Schedule") and names:
             shift_vars[p, "Night12"].Not()
         ])
 
-    # Solve
     solver = cp_model.CpSolver()
     solver.parameters.random_seed = random.randint(1, 10000)
     status = solver.Solve(model)
@@ -142,27 +130,26 @@ if st.button("Generate Schedule") and names:
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
         st.success("Schedule generated successfully!")
         doc = Document()
-        doc.add_heading("Shift Schedule", 0)
-        table = doc.add_table(rows=1, cols=3)
-        table.style = 'Light Grid'
-        hdr = table.rows[0].cells
-        hdr[0].text = 'Name'
-        hdr[1].text = 'Shift'
-        hdr[2].text = 'Duty Post'
+        doc.add_heading("Shift Schedule by Duty Post", 0)
 
-        for p in names:
-            shift = next(s for s in shifts if solver.Value(shift_vars[p, s]) == 1)
-            assigned_post = next((post for (pp, post, s2) in assign_vars if pp == p and solver.Value(assign_vars[pp, post, s2])), "Off")
-            row = table.add_row().cells
-            row[0].text = p
-            row[1].text = shift
-            row[2].text = assigned_post
+        shift_order = ["A", "B", "C", "Day12", "Night12"]
+        post_shift_map = defaultdict(lambda: {s: "" for s in shift_order})
+
+        for (p, post, s) in assign_vars:
+            if solver.Value(assign_vars[p, post, s]) == 1:
+                post_shift_map[post][s] = p
+
+        for post in all_posts:
+            doc.add_paragraph(post, style='Heading 2')
+            for s in shift_order:
+                if post_shift_map[post][s]:
+                    doc.add_paragraph(f"Shift {s}: {post_shift_map[post][s]}", style='List Bullet')
 
         buffer = io.BytesIO()
         doc.save(buffer)
         buffer.seek(0)
 
-        st.download_button("Download Schedule", buffer, file_name="shift_schedule.docx",
+        st.download_button("Download Schedule", buffer, file_name="shift_schedule_by_post.docx",
                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
     else:
         st.error("No feasible schedule found. Try adjusting inputs or constraints.")
