@@ -43,47 +43,67 @@ if hist_file:
             "Day12": int(row.get("Day12", 0))
         }
 
-# --- PARSE MERGE LIST ---
-merged_groups = []
-for line in merge_input:
-    parts = [p.strip() for p in line.split(",") if p.strip()]
-    if len(parts) > 1:
-        merged_groups.append(parts)
+# --- 2. PREPROCESSING: Determine shift demand ---
+def plan_shifts(names, common_posts, c_only_posts, merged_groups):
+    total_people = len(names)
+    used_people = len(c_only_posts)  # for C-only posts
+    post_plan = {}
+    shift_demand = defaultdict(int)
+    merged_map = {}
+    merged_set = set()
 
-# --- SCHEDULING ---
-if st.button("Generate Schedule") and names:
+    for group in merged_groups:
+        parts = [p.strip() for p in group.split(",") if p.strip()]
+        if len(parts) > 1:
+            top = parts[0]
+            for p in parts[1:]:
+                merged_map[p] = top
+                merged_set.add(p)
+
+    post_list = []
+    for p in common_posts:
+        if p in merged_set:
+            continue
+        post_list.append(p)
+
+    # Fill all C-only posts with C shift
+    for p in c_only_posts:
+        post_plan[p] = ["C"]
+        shift_demand["C"] += 1
+
+    # Try 8-hour shifts for common posts, else 12-hr, else unfilled
+    for post in post_list[::-1]:  # bottom priority first
+        if used_people + 3 <= total_people:
+            post_plan[post] = ["A", "B", "C"]
+            shift_demand["A"] += 1
+            shift_demand["B"] += 1
+            shift_demand["C"] += 1
+            used_people += 3
+        elif used_people + 2 <= total_people:
+            post_plan[post] = ["Day12", "Night12"]
+            shift_demand["Day12"] += 1
+            shift_demand["Night12"] += 1
+            used_people += 2
+        else:
+            post_plan[post] = []  # left unfilled
+
+    return shift_demand, post_plan
+
+# --- 3. SHIFT ASSIGNMENT ---
+def assign_shifts_with_ortools(names, shift_demand, prev_shift_map, weekly_counts):
+    random.shuffle(names)  # 🟢 Shuffle before model definition
     model = cp_model.CpModel()
     shifts = ["A", "B", "C", "Day12", "Night12", "Off"]
     shift_vars = {(p, s): model.NewBoolVar(f"{p}_{s}") for p in names for s in shifts}
-    assign_vars = {}
-
-    all_posts = c_only_posts + common_posts.copy()
-    for group in merged_groups:
-        top = next((p for p in common_posts if p in group), None)
-        if top:
-            for sub in group:
-                if sub != top and sub in all_posts:
-                    all_posts.remove(sub)
-
-    for p in names:
-        for post in all_posts:
-            for s in ["A", "B", "C", "Day12", "Night12"]:
-                assign_vars[p, post, s] = model.NewBoolVar(f"assign_{p}_{post}_{s}")
 
     for p in names:
         model.AddExactlyOne(shift_vars[p, s] for s in shifts)
 
-    for (p, post, s), var in assign_vars.items():
-        model.Add(var <= shift_vars[p, s])
-
-    for post in c_only_posts:
-        model.AddExactlyOne(assign_vars[p, post, "C"] for p in names if (p, post, "C") in assign_vars)
-
-    for post in common_posts:
-        for s in ["A", "B", "C"]:
-            post_key = [assign_vars[p, post, s] for p in names if (p, post, s) in assign_vars]
-            if post_key:
-                model.Add(sum(post_key) == 1)
+    for p in names:
+        prev = prev_shift_map.get(p, "")
+        if prev in ["C", "Night12"]:
+            model.Add(shift_vars[p, "A"] == 0)
+            model.Add(shift_vars[p, "Day12"] == 0)
 
     if weekly_counts:
         max_4_allowed = max(1, int(len(names) * 0.10))
@@ -104,15 +124,8 @@ if st.button("Generate Schedule") and names:
             flags.append(flag)
         model.Add(sum(flags) <= max_4_allowed)
 
-    for p in names:
-        prev = prev_shift_map.get(p, "")
-        if prev in ["C", "Night12"]:
-            model.Add(shift_vars[p, "A"] == 0)
-            model.Add(shift_vars[p, "Day12"] == 0)
-
-    for p in names:
-        assigned_posts = [var for (pp, post, s), var in assign_vars.items() if pp == p]
-        model.Add(sum(assigned_posts) <= 1)
+    for s, count in shift_demand.items():
+        model.Add(sum(shift_vars[p, s] for p in names) == count)
 
     for p in names:
         model.Add(shift_vars[p, "Off"] == 1).OnlyEnforceIf([
@@ -128,20 +141,44 @@ if st.button("Generate Schedule") and names:
     status = solver.Solve(model)
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+        result = {}
+        for p in names:
+            for s in shifts:
+                if solver.Value(shift_vars[p, s]):
+                    result[p] = s
+        return result
+    else:
+        return None
+
+# --- 4. FINAL OUTPUT ---
+if st.button("Generate Schedule") and names:
+    shift_demand, post_plan = plan_shifts(names, common_posts, c_only_posts, merge_input)
+    shift_assignment = assign_shifts_with_ortools(names, shift_demand, prev_shift_map, weekly_counts)
+
+    if shift_assignment:
         st.success("Schedule generated successfully!")
         doc = Document()
         doc.add_heading("Shift Schedule by Duty Post", 0)
 
-        shift_order = ["A", "B", "C", "Day12", "Night12"]
-        post_shift_map = defaultdict(lambda: {s: "" for s in shift_order})
+        shifts_order = ["A", "B", "C", "Day12", "Night12"]
+        post_shift_map = defaultdict(lambda: {s: "" for s in shifts_order})
 
-        for (p, post, s) in assign_vars:
-            if solver.Value(assign_vars[p, post, s]) == 1:
-                post_shift_map[post][s] = p
+        shift_to_people = defaultdict(list)
+        for p, s in shift_assignment.items():
+            shift_to_people[s].append(p)
 
-        for post in all_posts:
+        for s in shift_to_people:
+            random.shuffle(shift_to_people[s])  # 🟢 Randomize assignment per shift
+
+        for post, shifts in post_plan.items():
+            for s in shifts:
+                if shift_to_people[s]:
+                    person = shift_to_people[s].pop()
+                    post_shift_map[post][s] = person
+
+        for post in post_plan:
             doc.add_paragraph(post, style='Heading 2')
-            for s in shift_order:
+            for s in shifts_order:
                 if post_shift_map[post][s]:
                     doc.add_paragraph(f"Shift {s}: {post_shift_map[post][s]}", style='List Bullet')
 
@@ -152,4 +189,4 @@ if st.button("Generate Schedule") and names:
         st.download_button("Download Schedule", buffer, file_name="shift_schedule_by_post.docx",
                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
     else:
-        st.error("No feasible schedule found. Try adjusting inputs or constraints.")
+        st.error("No feasible schedule found. Try adjusting constraints or increasing staff.")
