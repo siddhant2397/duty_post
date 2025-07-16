@@ -43,14 +43,13 @@ if hist_file:
             "Day12": int(row.get("Day12", 0))
         }
 
-# --- 2. PREPROCESSING: Determine shift demand ---
+# --- 2. IMPROVED SHIFT PLANNING ---
 def plan_shifts(names, common_posts, c_only_posts, merged_groups):
     total_people = len(names)
-    used_people = len(c_only_posts)  # for C-only posts
-    post_plan = OrderedDict()
     shift_demand = defaultdict(int)
-    merged_map = {}
     merged_set = set()
+    merged_map = {}
+    post_plan = OrderedDict()
 
     for group in merged_groups:
         parts = [p.strip() for p in group.split(",") if p.strip()]
@@ -60,36 +59,62 @@ def plan_shifts(names, common_posts, c_only_posts, merged_groups):
                 merged_map[p] = top
                 merged_set.add(p)
 
-    post_list = []
-    for p in common_posts:
-        if p in merged_set:
-            continue
-        post_list.append(p)
-
-    # Fill all C-only posts with C shift
-    for p in c_only_posts:
-        post_plan[p] = ["C"]
+    # Step 1: Reserve people for C-only posts
+    used_people = 0
+    for post in c_only_posts:
+        post_plan[post] = ["C"]
         shift_demand["C"] += 1
+        used_people += 1
 
-    # Attempt to fill posts with 8h shifts, else convert to 12h, else leave vacant
-    for post in post_list:
-        if used_people + 3 <= total_people:
-            post_plan[post] = ["A", "B", "C"]
-            shift_demand["A"] += 1
-            shift_demand["B"] += 1
-            shift_demand["C"] += 1
-            used_people += 3
-        elif used_people + 2 <= total_people:
-            post_plan[post] = ["Day12", "Night12"]
+    # Step 2: Remove merged duplicates
+    reduced_common = []
+    seen = set()
+    for post in common_posts:
+        if post in merged_set:
+            continue
+        if post in seen:
+            continue
+        reduced_common.append(post)
+        seen.add(post)
+
+    # Step 3: Start with all 8-hour posts
+    post_status = OrderedDict((p, ["A", "B", "C"]) for p in reduced_common)
+
+    # Step 4: Iteratively convert lowest-priority posts to 12-hr until feasible
+    def required_people(post_dict):
+        count = 0
+        for shifts in post_dict.values():
+            if shifts == ["A", "B", "C"]:
+                count += 3
+            elif shifts == ["Day12", "Night12"]:
+                count += 2
+        return count
+
+    while True:
+        total_required = used_people + required_people(post_status)
+        if total_required <= total_people:
+            break
+        # Convert lowest-priority post to 12-hour
+        bottom = next(reversed(post_status))
+        if post_status[bottom] == ["A", "B", "C"]:
+            post_status[bottom] = ["Day12", "Night12"]
             shift_demand["Day12"] += 1
             shift_demand["Night12"] += 1
-            used_people += 2
+            shift_demand["A"] -= 1 if shift_demand["A"] > 0 else 0
+            shift_demand["B"] -= 1 if shift_demand["B"] > 0 else 0
+            shift_demand["C"] -= 1 if shift_demand["C"] > 0 else 0
         else:
-            post_plan[post] = []  # vacant
+            # Already 12-hour, so remove post
+            post_status.pop(bottom)
+
+    for post, shifts in post_status.items():
+        post_plan[post] = shifts
+        for s in shifts:
+            shift_demand[s] += 1
 
     return shift_demand, post_plan
 
-# --- 3. SHIFT ASSIGNMENT ---
+# --- 3. OR-TOOLS SHIFT ASSIGNMENT ---
 def assign_shifts_with_ortools(names, shift_demand, prev_shift_map, weekly_counts):
     random.shuffle(names)
     model = cp_model.CpModel()
@@ -150,7 +175,7 @@ def assign_shifts_with_ortools(names, shift_demand, prev_shift_map, weekly_count
     else:
         return None
 
-# --- 4. FINAL OUTPUT ---
+# --- 4. OUTPUT ---
 if st.button("Generate Schedule") and names:
     shift_demand, post_plan = plan_shifts(names, common_posts, c_only_posts, merge_input)
     shift_assignment = assign_shifts_with_ortools(names, shift_demand, prev_shift_map, weekly_counts)
