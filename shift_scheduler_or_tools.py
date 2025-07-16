@@ -1,21 +1,14 @@
-
-
-
-
-# --- Shift Scheduler with OR-Tools, Word Export, Excel Input, Weekly Constraints, Merging, and 12-Hour Fallback ---
-
-
 import pandas as pd
 import streamlit as st
 from ortools.sat.python import cp_model
 from docx import Document
 from collections import defaultdict
-import datetime
 import io
+import random
 
-st.title("Smart Shift Scheduler with Constraints and Fallback Logic")
+st.title("Smart Shift Scheduler (Fair & Constraint-Based with OR-Tools)")
 
-# --- INPUT SECTION ---
+# --- 1. INPUT SECTION ---
 st.subheader("Upload Excel File with Names")
 excel_file = st.file_uploader("Upload Excel with Names", type=[".xlsx"])
 names = []
@@ -35,7 +28,7 @@ if prev_shift_input.strip():
             name, shift = line.split(":")
             prev_shift_map[name.strip()] = shift.strip()
 else:
-    st.warning("No previous shift data provided. Some shift constraints will be skipped.")
+    st.warning("No previous shift data provided. Some constraints will be relaxed.")
 
 st.subheader("Upload Weekly Shift History (Excel)")
 hist_file = st.file_uploader("Upload Weekly History Excel", type=[".xlsx"], key="weekly_hist")
@@ -49,8 +42,6 @@ if hist_file:
             "Night12": int(row.get("Night12", 0)),
             "Day12": int(row.get("Day12", 0))
         }
-else:
-    st.warning("Weekly shift history not provided. Weekly limits disabled.")
 
 # --- PARSE MERGE LIST ---
 merged_groups = []
@@ -63,126 +54,115 @@ for line in merge_input:
 if st.button("Generate Schedule") and names:
     model = cp_model.CpModel()
     shifts = ["A", "B", "C", "Day12", "Night12", "Off"]
-    vars = {(p, s): model.NewBoolVar(f"{p}_{s}") for p in names for s in shifts}
+    shift_vars = {(p, s): model.NewBoolVar(f"{p}_{s}") for p in names for s in shifts}
+    assign_vars = {}
+
+    # Create full list of duty posts
+    all_posts = c_only_posts + common_posts.copy()
+    # Merge posts if needed
+    for group in merged_groups:
+        top = next((p for p in common_posts if p in group), None)
+        if top:
+            for sub in group:
+                if sub != top and sub in all_posts:
+                    all_posts.remove(sub)
+
+    # Convert lowest priority to 12-hr if needed (skip now, fallback later)
+
+    # Create assignment vars (person, post, shift) only for real shifts (not Off)
+    for p in names:
+        for post in all_posts:
+            for s in ["A", "B", "C", "Day12", "Night12"]:
+                assign_vars[p, post, s] = model.NewBoolVar(f"assign_{p}_{post}_{s}")
+
+    # Each person gets exactly one shift
+    for p in names:
+        model.AddExactlyOne(shift_vars[p, s] for s in shifts)
+
+    # Link assignment to shift
+    for (p, post, s), var in assign_vars.items():
+        model.Add(var <= shift_vars[p, s])
+
+    # Post filling constraints
+    for post in c_only_posts:
+        model.AddExactlyOne(assign_vars[p, post, "C"] for p in names if (p, post, "C") in assign_vars)
+
+    for post in common_posts:
+        # Try 3 shifts: A, B, C
+        for s in ["A", "B", "C"]:
+            post_key = [assign_vars[p, post, s] for p in names if (p, post, s) in assign_vars]
+            if post_key:
+                model.Add(sum(post_key) == 1)
+
+    # Weekly limits & previous shift constraints
+    if weekly_counts:
+        max_4_allowed = max(1, int(len(names) * 0.10))
+        flags = []
+        for p in names:
+            wc = weekly_counts[p]
+            total_night = model.NewIntVar(0, 10, f"tn_{p}")
+            total_12hr = model.NewIntVar(0, 10, f"t12_{p}")
+            model.Add(total_night == wc["C"] + wc["Night12"] + shift_vars[p,"C"] + shift_vars[p,"Night12"])
+            model.Add(total_12hr == wc["Day12"] + wc["Night12"] + shift_vars[p,"Day12"] + shift_vars[p,"Night12"])
+            model.Add(total_12hr <= 3)
+            flag = model.NewBoolVar(f"flag_{p}")
+            gt3 = model.NewBoolVar(f"gt3_{p}")
+            model.Add(total_night > 3).OnlyEnforceIf(gt3)
+            model.Add(total_night <= 3).OnlyEnforceIf(gt3.Not())
+            model.Add(flag == 1).OnlyEnforceIf(gt3)
+            model.Add(flag == 0).OnlyEnforceIf(gt3.Not())
+            flags.append(flag)
+        model.Add(sum(flags) <= max_4_allowed)
 
     for p in names:
-        model.AddExactlyOne(vars[p, s] for s in shifts)
         prev = prev_shift_map.get(p, "")
         if prev in ["C", "Night12"]:
-            model.Add(vars[p, "A"] == 0)
-            model.Add(vars[p, "Day12"] == 0)
+            model.Add(shift_vars[p, "A"] == 0)
+            model.Add(shift_vars[p, "Day12"] == 0)
 
-    if weekly_counts:
-        n = len(names)
-        max_4_allowed = max(1, int(n * 0.10))
-        exceeds_night = []
-        for p in names:
-            c_prev, n12_prev, d12_prev = weekly_counts[p].values()
-            total_night = model.NewIntVar(0, 10, f"total_night_{p}")
-            total_12hr = model.NewIntVar(0, 10, f"total_12hr_{p}")
-            model.Add(total_night == c_prev + n12_prev + vars[p,"C"] + vars[p,"Night12"])
-            model.Add(total_12hr == d12_prev + n12_prev + vars[p,"Day12"] + vars[p,"Night12"])
-            model.Add(total_12hr <= 3)
-            flag = model.NewBoolVar(f"exceeds_night_{p}")
-            cond = model.NewBoolVar(f"night_gt3_{p}")
-            model.Add(total_night > 3).OnlyEnforceIf(cond)
-            model.Add(total_night <= 3).OnlyEnforceIf(cond.Not())
-            model.Add(flag == 1).OnlyEnforceIf(cond)
-            model.Add(flag == 0).OnlyEnforceIf(cond.Not())
-            exceeds_night.append(flag)
-        model.Add(sum(exceeds_night) <= max_4_allowed)
-
-    used = set()
-    assigned_vars = []
-    post_needs = defaultdict(list)
-
-    # --- STEP 1: Fill all C-only posts with C shift ---
-    for post in c_only_posts:
-        for p in names:
-            if p not in used:
-                model.Add(vars[p,"C"] == 1)
-                assigned_vars.append((p,"C",post))
-                used.add(p)
-                break
-
-    # --- STEP 2: Attempt 8-hour shifts for common posts ---
-    for post in common_posts:
-        post_needs[post] = ["A", "B", "C"]
-
-    total_need = sum(len(v) for v in post_needs.values())
-    people_left = len(names) - len(used)
-
-    # --- STEP 3: Try merging ---
-    if people_left < total_need:
-        for group in merged_groups:
-            top = next((p for p in common_posts if p in group), None)
-            if top:
-                for sub in group:
-                    if sub != top and sub in post_needs:
-                        del post_needs[sub]
-                post_needs[top] = ["A", "B", "C"]
-
-    # --- STEP 4: Convert bottom posts to 12-hr if still short ---
-    flat = list(post_needs.items())[::-1]
-    for post, shifts_list in flat:
-        people_left = len(names) - len(used)
-        if people_left >= len(shifts_list):
-            continue
-        elif people_left >= 2:
-            post_needs[post] = ["Day12", "Night12"]
-        else:
-            del post_needs[post]
-
-    # --- STEP 5: Assign shifts to people ---
-    for post, shifts in post_needs.items():
-        for s in shifts:
-            for p in names:
-                if p not in used:
-                    model.Add(vars[p, s] == 1)
-                    assigned_vars.append((p, s, post))
-                    used.add(p)
-                    break
-
-    # --- STEP 6: Weekly off ---
     for p in names:
-        if p not in used:
-            model.Add(vars[p, "Off"] == 1)
+        assigned_posts = [var for (pp, post, s), var in assign_vars.items() if pp == p]
+        model.Add(sum(assigned_posts) <= 1)
 
-    # --- STEP 7: Solve ---
+    # Assign Off if not assigned
+    for p in names:
+        model.Add(shift_vars[p, "Off"] == 1).OnlyEnforceIf([
+            shift_vars[p, "A"].Not(),
+            shift_vars[p, "B"].Not(),
+            shift_vars[p, "C"].Not(),
+            shift_vars[p, "Day12"].Not(),
+            shift_vars[p, "Night12"].Not()
+        ])
+
+    # Solve
     solver = cp_model.CpSolver()
+    solver.parameters.random_seed = random.randint(1, 10000)
     status = solver.Solve(model)
 
-    if status in [cp_model.FEASIBLE, cp_model.OPTIMAL]:
+    if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
         st.success("Schedule generated successfully!")
         doc = Document()
         doc.add_heading("Shift Schedule", 0)
         table = doc.add_table(rows=1, cols=3)
         table.style = 'Light Grid'
-        hdr_cells = table.rows[0].cells
-        hdr_cells[0].text = 'Name'
-        hdr_cells[1].text = 'Shift'
-        hdr_cells[2].text = 'Duty Post'
+        hdr = table.rows[0].cells
+        hdr[0].text = 'Name'
+        hdr[1].text = 'Shift'
+        hdr[2].text = 'Duty Post'
 
         for p in names:
-            for s in shifts:
-                if solver.Value(vars[p,s]) == 1:
-                    duty = next((x[2] for x in assigned_vars if x[0]==p), "N/A")
-                    row = table.add_row().cells
-                    row[0].text = p
-                    row[1].text = s
-                    row[2].text = duty
+            shift = next(s for s in shifts if solver.Value(shift_vars[p, s]) == 1)
+            assigned_post = next((post for (pp, post, s2) in assign_vars if pp == p and solver.Value(assign_vars[pp, post, s2])), "Off")
+            row = table.add_row().cells
+            row[0].text = p
+            row[1].text = shift
+            row[2].text = assigned_post
 
         buffer = io.BytesIO()
         doc.save(buffer)
         buffer.seek(0)
 
-        st.download_button(
-            label="Download Schedule as Word",
-            data=buffer,
-            file_name="shift_schedule.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
+        st.download_button("Download Schedule", buffer, file_name="shift_schedule.docx",
+                           mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
     else:
-        st.error("Could not generate feasible schedule with given inputs.")
-
-
+        st.error("No feasible schedule found. Try adjusting inputs or constraints.")
