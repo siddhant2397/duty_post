@@ -118,22 +118,138 @@ if file:
             return eight_hr_posts, twelve_hr_posts
 
         # ==== Main iterative scheduling loop ====
-        merged_dict, merged_priority_list = merge_posts(posts_common_male, merge_groups)
         max_merges = len(merge_groups) + 1
 
         feasible_solution = None
         solution_info = ""
+        solution_found = False
 
+        # Phase 1: Exhaust merges with only 8-hour shifts (no conversions)
         for merge_idx in range(max_merges):
             applied_merges = merge_groups[:merge_idx]
             m_dict, m_priority_list = merge_posts(posts_common_male, applied_merges)
             num_merged_posts = len(m_priority_list)
-            max_8h_posts = num_merged_posts
 
-            for num_convert_12h in range(num_merged_posts + 1):
+            eight_hr_posts = m_priority_list
+            twelve_hr_posts = []
+
+            st.write(f"Trying merges={merge_idx} with no 12hr conversion")
+            st.write(f"Merged list: {m_priority_list}")
+
+            # Build entries with no 12 hr shifts - your existing code for entries here
+            entries = []
+
+            tech_indices = set(staff[is_tech].index)
+            for post in posts_tech:
+                entries.append((post, ["General"], tech_indices))
+            male_indices = set(staff[is_male].index)
+            for post in posts_gen_male:
+                entries.append((post, ["General"], male_indices))
+            female_indices = set(staff[is_female].index)
+            for post in posts_gen_female:
+                entries.append((post, ["General"], female_indices))
+            for post in posts_c_only:
+                entries.append((post, ["C"], male_indices))
+            for post in posts_common_female:
+                entries.append((f"{post}_A", ["A"], female_indices))
+                entries.append((f"{post}_B", ["B"], female_indices))
+                entries.append((f"{post}_C", ["C"], male_indices))
+            for merged_post in eight_hr_posts:
+                for shift in shifts8:
+                    entries.append((f"{merged_post}_{shift}", [shift], male_indices))
+
+            # Model build and solve (your existing code)
+            model = cp_model.CpModel()
+            slot_list = []
+            for post, shifts, elig in entries:
+                for day in range(num_days):
+                    for s in shifts:
+                        slot_list.append((post, day, s, elig))
+
+            X = {}
+            for slot_id, (post, day, shift, elig) in enumerate(slot_list):
+                for p in elig:
+                    X[p, slot_id] = model.NewBoolVar(f"assign_{names[p]}_{post}_d{day}_s{shift}")
+
+            for slot_id, (_, _, _, elig) in enumerate(slot_list):
+                model.AddExactlyOne([X[p, slot_id] for p in elig])
+
+            all_shifts = shifts8 + shifts12 + ["General"]
+            for p in staff.index:
+                for day in range(num_days):
+                    slots_same_day = [sid for sid, (_, day_, shift_, elig_) in enumerate(slot_list)
+                                      if day_ == day and p in elig_]
+                    if len(slots_same_day) > 1:
+                        model.Add(sum(X[p, sid] for sid in slots_same_day) <= 1)
+
+            n_staff_10pc = max(1, int(np.ceil(0.1 * len(staff))))
+            extra_night_staff = [model.NewBoolVar(f'ext_night_{names[p]}') for p in staff.index]
+            for idx, p in enumerate(staff.index):
+                night_slots = [sid for sid, (_, _, shift_, elig_) in enumerate(slot_list)
+                               if shift_ in ("C", "Night12") and p in elig_]
+                tot_nights = model.NewIntVar(0, num_days, f"nightcount_{names[p]}")
+                model.Add(tot_nights == sum(X[p, sid] for sid in night_slots))
+                model.Add(tot_nights <= 3 + extra_night_staff[idx] * num_days)
+            model.Add(sum(extra_night_staff) <= n_staff_10pc)
+
+            for p in staff.index:
+                slots_12h = [sid for sid, (_, _, shift_, elig_) in enumerate(slot_list)
+                             if shift_ in ("Day12", "Night12") and p in elig_]
+                tot_12h = model.NewIntVar(0, num_days, f"tot12_{names[p]}")
+                model.Add(tot_12h == sum(X[p, sid] for sid in slots_12h))
+                model.Add(tot_12h <= 3)
+
+            for p in staff.index:
+                for day in range(num_days - 1):
+                    c_night_sids = [sid for sid, (_, day_, shift_, elig_) in enumerate(slot_list)
+                                    if day_ == day and shift_ in ("C", "Night12") and p in elig_]
+                    next_sids = [sid for sid, (_, day_, shift_, elig_) in enumerate(slot_list)
+                                 if day_ == day + 1 and shift_ in ("A", "Day12") and p in elig_]
+                    for s1 in c_night_sids:
+                        for s2 in next_sids:
+                            model.AddBoolOr([X[p, s1].Not(), X[p, s2].Not()])
+
+            eight_hr_sids = [sid for sid, (_, _, shift_, _) in enumerate(slot_list) if shift_ in shifts8]
+            model.Maximize(sum(X[p, sid] for sid in eight_hr_sids for p in staff.index if (p, sid) in X))
+
+            solver = cp_model.CpSolver()
+            solver.parameters.max_time_in_seconds = 60.0
+            status = solver.Solve(model)
+
+            if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                feasible_solution = {
+                    "solver": solver,
+                    "X": X,
+                    "slot_list": slot_list,
+                    "staff": staff,
+                    "names": names,
+                    "merged_dict": m_dict,
+                    "merged_priority_list": m_priority_list,
+                    "eight_hr_posts": eight_hr_posts,
+                    "twelve_hr_posts": twelve_hr_posts,
+                    "merge_idx": merge_idx,
+                    "num_convert_12h": 0,
+                    "num_days": num_days
+                }
+                solution_info = f"Solution found with {merge_idx} merge groups and NO 12-hour shifts."
+                solution_found = True
+                break
+            else:
+                solution_found = False
+
+        if not solution_found:
+            st.write("No feasible solution found with merges and all 8-hour shifts.")
+            # Phase 2 - start conversions with full merging
+            applied_merges = merge_groups[:]  # all merges
+            m_dict, m_priority_list = merge_posts(posts_common_male, applied_merges)
+            num_merged_posts = len(m_priority_list)
+
+            for num_convert_12h in range(1, num_merged_posts + 1):
                 eight_hr_posts, twelve_hr_posts = convert_priority_list_to_shifts(
-                    m_priority_list, max_8h_posts - num_convert_12h
+                    m_priority_list, num_merged_posts - num_convert_12h
                 )
+                st.write(f"Trying {num_convert_12h} 12-hour converted posts after full merging")
+
                 entries = []
 
                 tech_indices = set(staff[is_tech].index)
@@ -158,6 +274,8 @@ if file:
                     for shift in shifts12:
                         entries.append((f"{merged_post}_{shift}", [shift], male_indices))
 
+                # Build & solve model same way...
+
                 model = cp_model.CpModel()
                 slot_list = []
                 for post, shifts, elig in entries:
@@ -173,7 +291,6 @@ if file:
                 for slot_id, (_, _, _, elig) in enumerate(slot_list):
                     model.AddExactlyOne([X[p, slot_id] for p in elig])
 
-                all_shifts = shifts8 + shifts12 + ["General"]
                 for p in staff.index:
                     for day in range(num_days):
                         slots_same_day = [sid for sid, (_, day_, shift_, elig_) in enumerate(slot_list)
@@ -230,14 +347,19 @@ if file:
                         "num_convert_12h": num_convert_12h,
                         "num_days": num_days
                     }
-                    solution_info = f"Used {merge_idx} merge groups of posts and converted {num_convert_12h} posts to 12h shifts."
+                    solution_info = f"Used full merges and converted {num_convert_12h} posts to 12h shifts."
                     break
+
             if feasible_solution is not None:
                 break
 
         if feasible_solution is None:
-            st.error("No feasible schedule found. Try adjusting posts or staff.")
+            st.error("No feasible schedule found after merging and conversions. Try adjusting inputs.")
             st.stop()
+
+        # Continue with your output formatting and off assignments as before...
+        # ...
+
 
         # === Build final priority list reflecting stepwise merged posts ===
         # Priority order:
