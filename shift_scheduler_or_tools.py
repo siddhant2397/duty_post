@@ -329,6 +329,11 @@ if file:
                         off_data.append([staff.loc[p, "Name"], "OFF", day, "OFF"])
 
         df_off = pd.DataFrame(off_data, columns=["Name", "Post", "Day", "Shift"])
+        conflicts = pd.merge(df_off, df_assign, on=["Name", "Day"], how="inner")
+        if not conflicts.empty:
+            st.warning("Persons assigned both shifts and OFF on same day found:")
+            st.dataframe(conflicts)
+
         if not df_off.empty:
             st.subheader("OFF Assignments")
             st.dataframe(df_off.sort_values(by=["Day", "Name"]))
