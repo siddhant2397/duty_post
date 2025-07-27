@@ -1,203 +1,396 @@
 import streamlit as st
 import pandas as pd
 from ortools.sat.python import cp_model
-from collections import defaultdict, OrderedDict
-from docx import Document
-import io
-import random
+import numpy as np
 
-st.title("💼 Smart Shift Scheduler (with OR-Tools, Gender & Tech Constraints)")
+st.title("Advanced Shift Scheduler with Proper Merging & 12-hr Conversion Logic")
 
-# 1. Upload Excel Input
-st.subheader("Upload Excel with Name, Gender (M/F), Technical (Yes/No)")
-excel_file = st.file_uploader("Upload Excel", type=["xlsx"])
-names_data = []
-if excel_file:
-    df = pd.read_excel(excel_file)
-    for _, row in df.iterrows():
-        name = str(row[0]).strip()
-        gender = str(row[1]).strip().upper()
-        tech = str(row[2]).strip().lower() == 'yes'
-        names_data.append((name, gender, tech))
+# == Input Step 1: Upload Staff Excel ==
+file = st.file_uploader(
+    "Upload Staff Excel (Name, Gender (M/F), Technical (Yes/No))",
+    type="xlsx",
+    help="Excel file with columns: Name, Gender, Technical"
+)
 
-# Split by category
-males = [n for n, g, t in names_data if g == 'M']
-females = [n for n, g, t in names_data if g == 'F']
-tech_males = [n for n, g, t in names_data if g == 'M' and t]
-tech_females = [n for n, g, t in names_data if g == 'F' and t]
-nontech_males = [n for n in males if n not in tech_males]
-nontech_females = [n for n in females if n not in tech_females]
+def to_bool_tech(x):
+    if isinstance(x, str):
+        return x.strip().lower() == "yes"
+    return bool(x)
 
-# 2. Duty Post Inputs
-st.subheader("Duty Post Inputs")
-tech_posts = st.text_area("Technical General Shift Posts").splitlines()
-gen_male_posts = st.text_area("General Shift Posts (Male)").splitlines()
-gen_female_posts = st.text_area("General Shift Posts (Female)").splitlines()
-c_only_posts = st.text_area("C Shift Only Posts (Male Only)").splitlines()
-common_posts_female = st.text_area("Common Posts (Female)").splitlines()
-common_posts_male = st.text_area("Common Posts (Male)").splitlines()
-merge_groups = st.text_area("Merge Groups (e.g. Gate1, Gate2)").splitlines()
+if file:
+    staff = pd.read_excel(file)
+    if not all(col in staff.columns for col in ['Name', 'Gender', 'Technical']):
+        st.error("Excel must have 'Name', 'Gender', and 'Technical' columns")
+        st.stop()
 
-# Clean merge map
-merge_map = {}
-for group in merge_groups:
-    items = [p.strip() for p in group.split(",")]
-    top = items[0]
-    for p in items[1:]:
-        merge_map[p] = top
+    staff = staff.dropna(subset=['Name', 'Gender', 'Technical'])
+    staff['Name'] = staff['Name'].astype(str).str.strip()
+    staff['Gender'] = staff['Gender'].astype(str).str.upper().str.strip()
+    staff['Technical'] = staff['Technical'].apply(to_bool_tech)
+    staff = staff.reset_index(drop=True)
+    st.write(f"Uploaded {len(staff)} personnel")
+    st.dataframe(staff)
 
-# 3. Generate Shift Demand
-def build_shift_plan():
-    post_plan = OrderedDict()
-    shift_demand = defaultdict(int)
-    total_used = 0
+    # == Input Step 2: Define posts and merges ==
+    st.header("Define Duty Posts and Merge Groups")
 
-    # Assign tech posts
-    for post in tech_posts:
-        post_plan[post] = ["General"]
-        shift_demand["General"] += 1
-        total_used += 1
+    num_days = st.number_input("Number of Days to Schedule", value=7, min_value=1, max_value=31)
 
-    # General shifts
-    for post in gen_male_posts:
-        post_plan[post] = ["General"]
-        shift_demand["General"] += 1
-        total_used += 1
-    for post in gen_female_posts:
-        post_plan[post] = ["General"]
-        shift_demand["General"] += 1
-        total_used += 1
+    # Posts input
+    posts_common_male = st.text_area(
+        "Male Common Duty Posts (Priority order from top to bottom, one per line)",
+        height=150,
+        help="Will be merged and converted as needed"
+    ).strip().splitlines()
 
-    # C-shift only
-    for post in c_only_posts:
-        post_plan[post] = ["C"]
-        shift_demand["C"] += 1
-        total_used += 1
+    posts_common_female = st.text_area(
+        "Female Common Duty Posts (one per line, A/B females, C males)",
+        height=150
+    ).strip().splitlines()
 
-    # Common Female posts (A, B by female, C by male)
-    for post in common_posts_female:
-        post_plan[post + "_A"] = ["A"]
-        post_plan[post + "_B"] = ["B"]
-        post_plan[post + "_C"] = ["C"]
-        shift_demand["A"] += 1
-        shift_demand["B"] += 1
-        shift_demand["C"] += 1
-        total_used += 3
+    posts_c_only = st.text_area(
+        "C-shift Only Posts (Male only)",
+        height=80
+    ).strip().splitlines()
 
-    # Common Male posts (start as 8-hr shifts)
-    for post in common_posts_male:
-        post_plan[post] = ["A", "B", "C"]
+    posts_gen_male = st.text_area(
+        "General Shift Posts (Non-Tech Males only)",
+        height=80
+    ).strip().splitlines()
 
-    # Handle merging & conversion to 12-hr if needed
-    remaining = len(names_data) - total_used
-    posts = [p for p in common_posts_male if p not in merge_map]
-    index = len(posts) - 1
-    while index >= 0:
-        needed = 3 * len(posts)
-        if needed <= remaining:
-            break
-        # convert last post to 12 hr
-        post = posts[index]
-        post_plan[post] = ["Day12", "Night12"]
-        posts.pop(index)
-        index -= 1
+    posts_gen_female = st.text_area(
+        "General Shift Posts (Non-Tech Females only)",
+        height=80
+    ).strip().splitlines()
 
-    for post in posts:
-        post_plan[post] = ["A", "B", "C"]
+    posts_tech = st.text_area(
+        "Technical General Shift Posts (all technical personnel eligible)",
+        height=80
+    ).strip().splitlines()
 
-    # Final shift demand update
-    for post, shifts in post_plan.items():
-        for s in shifts:
-            shift_demand[s] += 1
+    merge_lines = st.text_area(
+        "Mergable Male Common Duty Posts Groups (comma separated, priority order top-down)",
+        height=150,
+        help="Example:\nMCom2,MCom3\nMCom5,MCom6"
+    ).strip().splitlines()
 
-    return post_plan, shift_demand
+    # Parse merge groups into list of lists
+    merge_groups = []
+    for line in merge_lines:
+        group = [p.strip() for p in line.split(",") if p.strip()]
+        if len(group) > 1:
+            merge_groups.append(group)
 
-# 4. Solve with OR-Tools
-def solve_with_ortools(post_plan, shift_demand):
-    model = cp_model.CpModel()
-    shifts = list(shift_demand.keys())
-    shift_vars = {}
-    people = [n for n, _, _ in names_data]
-    for p in people:
-        for s in shifts:
-            shift_vars[(p, s)] = model.NewBoolVar(f"{p}_{s}")
-        model.AddExactlyOne(shift_vars[(p, s)] for s in shifts)
+    if st.button("Generate Schedule"):
 
-    # Enforce shift counts
-    for s in shifts:
-        model.Add(sum(shift_vars[(p, s)] for p in people) == shift_demand[s])
+        names = staff["Name"].tolist()
+        is_male = staff["Gender"] == "M"
+        is_female = staff["Gender"] == "F"
+        is_tech = staff["Technical"]
 
-    # Gender/Tech constraints
-    for post, shifts_list in post_plan.items():
-        for s in shifts_list:
-            if s == "General":
-                if post in tech_posts:
-                    for p in people:
-                        if p not in tech_males and p not in tech_females:
-                            model.Add(shift_vars[(p, s)] == 0)
-                elif post in gen_male_posts:
-                    for p in people:
-                        if p not in males:
-                            model.Add(shift_vars[(p, s)] == 0)
-                elif post in gen_female_posts:
-                    for p in people:
-                        if p not in females:
-                            model.Add(shift_vars[(p, s)] == 0)
-            elif post in c_only_posts or post.endswith("_C"):
-                for p in people:
-                    if p not in males:
-                        model.Add(shift_vars[(p, s)] == 0)
-            elif post.endswith("_A") or post.endswith("_B"):
-                for p in people:
-                    if p not in females:
-                        model.Add(shift_vars[(p, s)] == 0)
+        shifts8 = ["A", "B", "C"]
+        shifts12 = ["Day12", "Night12"]
 
-    # No "Off" shift unless only 8-hr shifts used
-    if "Day12" not in shift_demand and "Night12" not in shift_demand:
-        shift_demand["Off"] = len(people) - sum(shift_demand.values())
-        if shift_demand["Off"] > 0:
-            for p in people:
-                shift_vars[(p, "Off")] = model.NewBoolVar(f"{p}_Off")
-            for p in people:
-                model.AddExactlyOne(shift_vars[(p, s)] for s in list(shift_demand.keys()))
-            model.Add(sum(shift_vars[(p, "Off")] for p in people) == shift_demand["Off"])
+        # --- Helper functions ---
 
-    solver = cp_model.CpSolver()
-    status = solver.Solve(model)
+        def merge_posts(posts, merges):
+            """
+            Merge posts according to merges list.
+            Returns a dict: merged_post_name -> set(of original posts)
+            Also returns list of merged_post_names preserving priority:
+            Priority equals minimum index of merged posts in original posts list.
+            """
+            post_to_group = {}
+            groups = []
+            for group in merges:
+                merged_name = group[0]  # by default main post is first in group
+                groups.append((merged_name, set(group)))
+                for p in group:
+                    post_to_group[p] = merged_name
+            # Add unmerged posts as single
+            unmerged = [p for p in posts if p not in post_to_group]
+            for p in unmerged:
+                groups.append((p, {p}))
+                post_to_group[p] = p
 
-    if status in [cp_model.FEASIBLE, cp_model.OPTIMAL]:
-        assignment = {}
-        for p in people:
-            for s in shift_demand:
-                if solver.Value(shift_vars[(p, s)]) == 1:
-                    assignment[p] = s
-        return assignment
-    else:
-        return None
+            # Sort groups by minimal priority of any member post
+            def priority(g):
+                return min(posts.index(p) for p in g[1])
 
-# 5. Generate Schedule & Word file
-if st.button("Generate Schedule") and names_data:
-    post_plan, shift_demand = build_shift_plan()
-    assignment = solve_with_ortools(post_plan, shift_demand)
+            groups.sort(key=priority)
 
-    if assignment:
-        st.success("✅ Schedule Generated!")
-        doc = Document()
-        doc.add_heading("Shift Schedule", 0)
-        shifts = list(shift_demand.keys())
-        shift_groups = defaultdict(list)
-        for name, shift in assignment.items():
-            shift_groups[shift].append(name)
+            merged_dict = {name: members for name, members in groups}
 
-        for s in shifts:
-            doc.add_paragraph(f"Shift {s}", style='Heading 2')
-            for name in shift_groups.get(s, []):
-                doc.add_paragraph(name, style='List Bullet')
+            return merged_dict, [name for name, _ in groups]
 
-        buffer = io.BytesIO()
-        doc.save(buffer)
-        buffer.seek(0)
-        st.download_button("📄 Download Schedule", buffer, "shift_schedule.docx",
-                           "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-    else:
-        st.error("❌ Could not generate schedule. Try changing post counts or merge more.")
+        def convert_priority_list_to_shifts(merged_posts_list, eight_hr_count):
+            """
+            Convert bottom posts in merged posts list from 8h to 12h shifts
+            Return two lists:
+                - posts covered by 8h shifts
+                - posts covered by 12h shifts
+            """
+            if eight_hr_count > len(merged_posts_list):
+                eight_hr_count = len(merged_posts_list)
+
+            eight_hr_posts = merged_posts_list[:eight_hr_count]
+            twelve_hr_posts = merged_posts_list[eight_hr_count:]
+            return eight_hr_posts, twelve_hr_posts
+
+        # ==== Main iterative scheduling loop ====
+
+        # Step 1: Merge common male duty posts according to priority top-down
+        merged_dict, merged_priority_list = merge_posts(posts_common_male, merge_groups)
+
+        max_merges = len(merge_groups) + 1  # include no merge case
+
+        feasible_solution = None
+        solution_info = ""
+
+        # Iterate merges 0..max_merges
+        for merge_idx in range(max_merges):
+            # Select merges applied (top merge_idx groups)
+            applied_merges = merge_groups[:merge_idx]
+            m_dict, m_priority_list = merge_posts(posts_common_male, applied_merges)
+
+            # Number of distinct merged posts (to assign)
+            num_merged_posts = len(m_priority_list)
+
+            # For 8h coverage, max posts assigned fully by 8h
+            max_8h_posts = num_merged_posts
+
+            # Try converting 0 to all posts from bottom to 12h
+            for num_convert_12h in range(num_merged_posts + 1):
+
+                # Determine which merged posts are 8h and which are 12h shifts
+                eight_hr_posts, twelve_hr_posts = convert_priority_list_to_shifts(
+                    m_priority_list, max_8h_posts - num_convert_12h
+                )
+
+                # Build all posts with shifts & eligible people
+                entries = []
+
+                # Tech general shift posts
+                tech_indices = set(staff[is_tech].index)
+
+                for post in posts_tech:
+                    entries.append((post, ["General"], tech_indices))
+
+                # Non tech general male posts (allow tech males as well)
+                male_indices = set(staff[is_male].index)
+                tech_male_indices = set(staff[is_male & is_tech].index)
+                nontech_male_indices = set(staff[is_male & ~is_tech].index)
+                male_general_indices = male_indices  # tech and non-tech males eligible here
+
+                for post in posts_gen_male:
+                    entries.append((post, ["General"], male_general_indices))
+
+                # Non tech general female posts (allow tech females as well)
+                female_indices = set(staff[is_female].index)
+                tech_female_indices = set(staff[is_female & is_tech].index)
+                nontech_female_indices = set(staff[is_female & ~is_tech].index)
+                female_general_indices = female_indices
+
+                for post in posts_gen_female:
+                    entries.append((post, ["General"], female_general_indices))
+
+                # C-shift only posts (males only)
+                for post in posts_c_only:
+                    entries.append((post, ["C"], male_indices))
+
+                # Female common duty posts (A/B females, C males)
+                for post in posts_common_female:
+                    entries.append((f"{post}_A", ["A"], female_indices))
+                    entries.append((f"{post}_B", ["B"], female_indices))
+                    entries.append((f"{post}_C", ["C"], male_indices))
+
+                # Male common duty posts (merged). Each merged post treated as one unit.
+
+                # Eight hour shifts for posts in eight_hr_posts
+                for merged_post in eight_hr_posts:
+                    for shift in shifts8:
+                        entries.append((f"{merged_post}_{shift}", [shift], male_indices))
+                # Twelve hour shifts for posts in twelve_hr_posts
+                for merged_post in twelve_hr_posts:
+                    for shift in shifts12:
+                        entries.append((f"{merged_post}_{shift}", [shift], male_indices))
+
+                # Setup model
+                model = cp_model.CpModel()
+
+                # Build slot list (post, day, shift, elig)
+                slot_list = []
+                for post, shifts, elig in entries:
+                    for day in range(num_days):
+                        for s in shifts:
+                            slot_list.append((post, day, s, elig))
+
+                # Decision variables
+                X = {}
+                for slot_id, (post, day, shift, elig) in enumerate(slot_list):
+                    for p in elig:
+                        X[p, slot_id] = model.NewBoolVar(f"assign_{names[p]}_{post}_d{day}_s{shift}")
+
+                # Constraint: each slot exactly one person
+                for slot_id, (post, day, shift, elig) in enumerate(slot_list):
+                    model.AddExactlyOne([X[p, slot_id] for p in elig])
+
+                # Constraint: no person assigned two slots same day & shift
+                all_shifts = shifts8 + shifts12 + ["General"]
+                for p in staff.index:
+                    for day in range(num_days):
+                        for shift in all_shifts:
+                            slots_same = [sid for sid, (post_, day_, shift_, elig_) in enumerate(slot_list)
+                                          if day_ == day and shift_ == shift and p in elig_]
+                            if len(slots_same) > 1:
+                                model.Add(sum([X[p, sid] for sid in slots_same]) <= 1)
+
+                # Constraints max night shifts - similar to before
+                n_staff_10pc = max(1, int(np.ceil(0.1 * len(staff))))
+                extra_night_staff = [model.NewBoolVar(f'ext_night_{names[p]}') for p in staff.index]
+
+                for idx, p in enumerate(staff.index):
+                    night_slots = [sid for sid, (post_, day_, shift_, elig_) in enumerate(slot_list)
+                                   if shift_ in ("C", "Night12") and p in elig_]
+                    tot_nights = model.NewIntVar(0, num_days, f"nightcount_{names[p]}")
+                    model.Add(tot_nights == sum(X[p, sid] for sid in night_slots))
+                    model.Add(tot_nights <= 3 + extra_night_staff[idx] * num_days)
+
+                model.Add(sum(extra_night_staff) <= n_staff_10pc)
+
+                # Max 3 day12+night12 shifts per week per person
+                for p in staff.index:
+                    slots_12h = [sid for sid, (post_, day_, shift_, elig_) in enumerate(slot_list)
+                                 if shift_ in ("Day12", "Night12") and p in elig_]
+                    tot_12h = model.NewIntVar(0, num_days, f"tot12_{names[p]}")
+                    model.Add(tot_12h == sum(X[p, sid] for sid in slots_12h))
+                    model.Add(tot_12h <= 3)
+
+                # Forbidden transitions (No A/Day12 after C/Night12)
+                for p in staff.index:
+                    for day in range(num_days - 1):
+                        c_night_sids = [sid for sid, (post_, day_, shift_, elig_) in enumerate(slot_list)
+                                        if day_ == day and shift_ in ("C", "Night12") and p in elig_]
+                        next_sids = [sid for sid, (post_, day_, shift_, elig_) in enumerate(slot_list)
+                                     if day_ == day + 1 and shift_ in ("A", "Day12") and p in elig_]
+                        for s1 in c_night_sids:
+                            for s2 in next_sids:
+                                model.AddBoolOr([X[p, s1].Not(), X[p, s2].Not()])
+
+                # Objective: maximize assigned 8-hour shifts coverage
+                eight_hr_sids = [sid for sid, (post_, day_, shift_, _) in enumerate(slot_list) if shift_ in shifts8]
+                model.Maximize(sum(X[p, sid] for sid in eight_hr_sids for p in staff.index if (p, sid) in X))
+
+                # Solve
+                solver = cp_model.CpSolver()
+                solver.parameters.max_time_in_seconds = 60.0
+                status = solver.Solve(model)
+
+                if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                    feasible_solution = {
+                        "solver": solver,
+                        "X": X,
+                        "slot_list": slot_list,
+                        "staff": staff,
+                        "names": names,
+                        "merged_dict": m_dict,
+                        "merged_priority_list": m_priority_list,
+                        "eight_hr_posts": eight_hr_posts,
+                        "twelve_hr_posts": twelve_hr_posts,
+                        "merge_idx": merge_idx,
+                        "num_convert_12h": num_convert_12h,
+                        "num_days": num_days
+                    }
+                    solution_info = f"Used {merge_idx} merge groups of posts and converted {num_convert_12h} posts to 12h shifts."
+                    break
+            if feasible_solution is not None:
+                break
+
+        if feasible_solution is None:
+            st.error("No feasible schedule found. Try adjusting posts or staff.")
+            st.stop()
+
+        # === Extract, assign off and display schedule ===
+
+        solver = feasible_solution["solver"]
+        X = feasible_solution["X"]
+        slot_list = feasible_solution["slot_list"]
+        staff = feasible_solution["staff"]
+        num_days = feasible_solution["num_days"]
+
+        # Build assignments
+        assign_data = []
+        assigned_person_day = {(p, day): False for p in staff.index for day in range(num_days)}
+        for slot_id, (post, day, shift, elig) in enumerate(slot_list):
+            for p in elig:
+                if solver.Value(X[p, slot_id]):
+                    assign_data.append([staff.loc[p, "Name"], post, day + 1, shift])
+                    assigned_person_day[(p, day)] = True
+
+        df_assign = pd.DataFrame(assign_data, columns=["Name", "Post", "Day", "Shift"])
+
+        # Determine who got OFF shifts (not assigned) with your clarified off rules:
+        off_data = []
+
+        # Female OFF: If all woman's general + female common posts A/B shifts covered, surplus females off
+        female_shift_needed_posts = []
+        for post in posts_gen_female: female_shift_needed_posts.append((post, "General"))
+        for post in posts_common_female:
+            female_shift_needed_posts.append((f"{post}_A", "A"))
+            female_shift_needed_posts.append((f"{post}_B", "B"))
+        # Count shifts female staff assigned for those posts
+        females_indices = staff[is_female].index
+        for p in females_indices:
+            # Check if staff assigned all shifts available to her
+            assigned_shifts_count = df_assign[(df_assign["Name"] == staff.loc[p, "Name"]) &
+                                              (df_assign["Post"].isin([ps for ps, _ in female_shift_needed_posts]))].shape[0]
+            # Total expected female shifts * num_days
+            total_needed_shifts = len(female_shift_needed_posts) * num_days
+            if assigned_shifts_count < total_needed_shifts:
+                # Not assigned full duty, so working
+                continue
+            else:
+                # Eligible for OFF
+                for day in range(1, num_days + 1):
+                    off_data.append([staff.loc[p, "Name"], "OFF", day, "OFF"])
+
+        # Male OFF: Only if all male common duty posts covered by 8h shifts fully, not counting 12h coverage
+        merged_dict = feasible_solution["merged_dict"]
+        eight_hr_posts = feasible_solution["eight_hr_posts"]
+        twelve_hr_posts = feasible_solution["twelve_hr_posts"]
+
+        # Check if all merged male posts are fully covered by 8h shifts (meaning no 12h shift coverage)
+        if len(twelve_hr_posts) == 0:
+            male_common_needed_shifts = []
+            for merged_post in eight_hr_posts:
+                for shift in shifts8:
+                    male_common_needed_shifts.append(f"{merged_post}_{shift}")
+
+            males_indices = staff[is_male].index
+            for p in males_indices:
+                assigned = df_assign[(df_assign["Name"] == staff.loc[p, "Name"]) &
+                                     (df_assign["Post"].isin(male_common_needed_shifts))]
+                # If person assigned fewer than possible male common shifts then maybe assign OFF on those days
+                assigned_days = set(assigned["Day"].tolist())
+                for day in range(1, num_days + 1):
+                    if day not in assigned_days:
+                        off_data.append([staff.loc[p, "Name"], "OFF", day, "OFF"])
+
+        # Combine and display
+        df_off = pd.DataFrame(off_data, columns=["Name", "Post", "Day", "Shift"])
+
+        st.success("Schedule generated successfully!")
+        st.write(solution_info)
+
+        st.subheader("Shift Assignments")
+        st.dataframe(df_assign.sort_values(by=["Day", "Shift", "Post"]))
+
+        st.subheader("OFF Assignments")
+        st.dataframe(df_off.sort_values(by=["Day", "Name"]))
+
+        # Download buttons
+        st.download_button("Download Shift Assignments CSV", df_assign.to_csv(index=False), "shift_assignments.csv")
+        st.download_button("Download OFF Assignments CSV", df_off.to_csv(index=False), "off_assignments.csv")
+
+else:
+    st.info("Please upload your staff Excel file to start the scheduling process.")
