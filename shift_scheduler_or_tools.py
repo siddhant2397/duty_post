@@ -176,11 +176,10 @@ if file:
                 all_shifts = shifts8 + shifts12 + ["General"]
                 for p in staff.index:
                     for day in range(num_days):
-                        for shift in all_shifts:
-                            slots_same = [sid for sid, (_, day_, shift_, elig_) in enumerate(slot_list)
-                                          if day_ == day and shift_ == shift and p in elig_]
-                            if len(slots_same) > 1:
-                                model.Add(sum([X[p, sid] for sid in slots_same]) <= 1)
+                        slots_same_day = [sid for sid, (_, day_, shift_, elig_) in enumerate(slot_list)
+                                          if day_ == day and p in elig_]
+                        if len(slots_same_day) > 1:
+                            model.Add(sum(X[p, sid] for sid in slots_same_day) <= 1)
 
                 n_staff_10pc = max(1, int(np.ceil(0.1 * len(staff))))
                 extra_night_staff = [model.NewBoolVar(f'ext_night_{names[p]}') for p in staff.index]
