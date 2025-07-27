@@ -294,14 +294,21 @@ if file:
             female_shift_needed_posts.append((f"{post}_A", "A"))
             female_shift_needed_posts.append((f"{post}_B", "B"))
         females_indices = staff[is_female].index
-        df_assign = pd.DataFrame([[
-            staff.loc[p, "Name"], post, day + 1, shift
-        ] for p, day, shift, post, elig in 
-            [(p, day, shift, post, elig) 
-             for p, slot_id in feasible_solution["X"] 
-             for slot_id, (post, day, shift, elig) in enumerate(feasible_solution["slot_list"]) if p in elig 
-             if feasible_solution["solver"].Value(feasible_solution["X"][p, slot_id])]
-        ], columns=["Name", "Post", "Day", "Shift"])
+        assigned_records = []
+        X = feasible_solution["X"]
+        slot_list = feasible_solution["slot_list"]
+        solver = feasible_solution["solver"]
+        for slot_id, (post, day, shift, elig) in enumerate(slot_list):
+            for p in elig:
+                if solver.Value(X.get((p, slot_id), 0)) == 1:
+                    assigned_records.append([
+                        staff.loc[p, "Name"],
+                        post,
+                        day + 1,
+                        shift
+                    ])
+        
+        df_assign = pd.DataFrame(assigned_records, columns=["Name", "Post", "Day", "Shift"])
 
         for p in females_indices:
             assigned_shifts_count = df_assign[(df_assign["Name"] == staff.loc[p, "Name"]) &
