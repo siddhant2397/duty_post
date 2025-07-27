@@ -2,16 +2,15 @@ import streamlit as st
 import pandas as pd
 from collections import defaultdict, OrderedDict
 from ortools.sat.python import cp_model
+import random
 from docx import Document
 import io
-import random
 
-st.title("Smart Shift Scheduler (Gender + Technical + Constraints + OR-Tools)")
+st.title("Smart Shift Scheduler (Streamlit Version)")
 
-# --- 1. INPUT SECTION ---
-st.subheader("Upload Excel File with Names, Gender(M/F), Technical(Yes/No)")
+# --- Upload Excel File ---
+st.subheader("Upload Excel File: Name | Gender (M/F) | Technical (Yes/No)")
 excel_file = st.file_uploader("Upload Excel File", type=[".xlsx"])
-
 names_data = []
 if excel_file:
     df = pd.read_excel(excel_file)
@@ -22,193 +21,116 @@ if excel_file:
         if name:
             names_data.append((name, gender, tech))
 
-# Group people based on categories
-males = [n for n, g, t in names_data if g == 'M']
-females = [n for n, g, t in names_data if g == 'F']
-tech_males = [n for n, g, t in names_data if g == 'M' and t]
-tech_females = [n for n, g, t in names_data if g == 'F' and t]
+if names_data:
+    # Categorize
+    males = [n for n, g, t in names_data if g == 'M']
+    females = [n for n, g, t in names_data if g == 'F']
+    tech_males = [n for n, g, t in names_data if g == 'M' and t]
+    tech_females = [n for n, g, t in names_data if g == 'F' and t]
 
-# Posts Input
-common_posts_male = [p.strip() for p in st.text_area("COMMON Duty Posts (Male)").split("\n") if p.strip()]
-common_posts_female = [p.strip() for p in st.text_area("COMMON Duty Posts (Female)").split("\n") if p.strip()]
-c_only_posts = [p.strip() for p in st.text_area("C-SHIFT ONLY Posts (Male Only)").split("\n") if p.strip()]
-gen_posts_male = [p.strip() for p in st.text_area("NON-TECH General Shift Posts (Male)").split("\n") if p.strip()]
-gen_posts_female = [p.strip() for p in st.text_area("NON-TECH General Shift Posts (Female)").split("\n") if p.strip()]
-tech_posts = [p.strip() for p in st.text_area("TECHNICAL General Shift Posts").split("\n") if p.strip()]
-merge_input = st.text_area("MERGE Groups (comma-separated per line)").split("\n")
+    # --- Text Inputs ---
+    st.subheader("Enter Posts")
+    common_posts_male = st.text_area("COMMON duty posts for MALE (priority order)").split("\n")
+    common_posts_female = st.text_area("COMMON duty posts for FEMALE (priority order)").split("\n")
+    c_only_posts = st.text_area("C-SHIFT-ONLY duty posts (Male Only)").split("\n")
+    gen_posts_male = st.text_area("NON-TECH GENERAL SHIFT duty posts (Male)").split("\n")
+    gen_posts_female = st.text_area("NON-TECH GENERAL SHIFT duty posts (Female)").split("\n")
+    tech_posts = st.text_area("TECHNICAL GENERAL SHIFT duty posts").split("\n")
 
-# Previous shift info
-prev_shift_input = st.text_area("Previous Shift (Name: Shift per line)")
-prev_shift_map = {}
-if prev_shift_input.strip():
-    for line in prev_shift_input.strip().split("\n"):
-        if ":" in line:
-            name, shift = line.split(":")
-            prev_shift_map[name.strip()] = shift.strip()
-
-# Weekly history
-hist_file = st.file_uploader("Upload Weekly Shift History Excel", type=[".xlsx"], key="weekly_hist")
-weekly_counts = defaultdict(lambda: {"C": 0, "Night12": 0, "Day12": 0})
-if hist_file:
-    hist_df = pd.read_excel(hist_file)
-    for _, row in hist_df.iterrows():
-        name = row[0]
-        weekly_counts[name] = {
-            "C": int(row.get("C", 0)),
-            "Night12": int(row.get("Night12", 0)),
-            "Day12": int(row.get("Day12", 0))
-        }
-
-# --- 2. POST ALLOCATION PLAN ---
-def create_post_plan():
-    post_plan = OrderedDict()
-    shift_demand = defaultdict(int)
+    merge_input = st.text_area("MERGE groups (comma-separated per line)").split("\n")
     merge_map = {}
-    merged_set = set()
-
-    for group in merge_input:
-        parts = [p.strip() for p in group.split(",") if p.strip()]
+    for line in merge_input:
+        parts = [p.strip() for p in line.split(",") if p.strip()]
         if len(parts) > 1:
-            top = parts[0]
+            main = parts[0]
             for p in parts[1:]:
-                merge_map[p] = top
-                merged_set.add(p)
+                merge_map[p] = main
 
-    def reduce(posts):
-        reduced = []
+    if st.button("Generate Schedule"):
+        shift_options = ['A', 'B', 'C', 'Day12', 'Night12', 'General']
+        person_roles = {}
+        post_assignments = OrderedDict()
+
+        tech_all = tech_males + tech_females
+        for post in tech_posts:
+            if tech_all:
+                person = tech_all.pop(0)
+                person_roles[person] = 'Tech'
+                post_assignments[post] = (person, 'General')
+
+        for post in gen_posts_male:
+            if males:
+                person = males.pop(0)
+                person_roles[person] = 'GenMale'
+                post_assignments[post] = (person, 'General')
+
+        for post in gen_posts_female:
+            if females:
+                person = females.pop(0)
+                person_roles[person] = 'GenFemale'
+                post_assignments[post] = (person, 'General')
+
+        for post in c_only_posts:
+            if males:
+                person = males.pop(0)
+                person_roles[person] = 'COnly'
+                post_assignments[post] = (person, 'C')
+
+        for post in common_posts_female:
+            for shift in ['A', 'B']:
+                if females:
+                    person = females.pop(0)
+                    person_roles[person] = 'CommonF'
+                    post_assignments[f"{post}_{shift}"] = (person, shift)
+
+        for post in common_posts_female:
+            if males:
+                person = males.pop(0)
+                person_roles[person] = 'CommonF_C'
+                post_assignments[f"{post}_C"] = (person, 'C')
+
+        merged_set = set(merge_map.keys())
+        reduced_posts = []
         seen = set()
-        for p in posts:
-            if p not in seen and p not in merged_set:
-                reduced.append(p)
-                seen.add(p)
-        return reduced
 
-    reduced_common_male = reduce(common_posts_male)
-    reduced_common_female = reduce(common_posts_female)
+        for post in common_posts_male:
+            if post in merged_set or post in seen:
+                continue
+            reduced_posts.append(post)
+            seen.add(post)
 
-    for post in tech_posts:
-        post_plan[post] = ["G-Tech"]
-        shift_demand["G-Tech"] += 1
+        def people_needed(posts_dict):
+            return sum(3 if v == ['A', 'B', 'C'] else 2 for v in posts_dict.values())
 
-    for post in gen_posts_male:
-        post_plan[post] = ["G-M"]
-        shift_demand["G-M"] += 1
+        post_status = OrderedDict((p, ['A', 'B', 'C']) for p in reduced_posts)
+        for p_from, p_to in merge_map.items():
+            if p_from in reduced_posts:
+                reduced_posts.remove(p_from)
+                post_status[p_to] = ['A', 'B', 'C']
 
-    for post in gen_posts_female:
-        post_plan[post] = ["G-F"]
-        shift_demand["G-F"] += 1
+        while people_needed(post_status) > len(males):
+            last_post = list(post_status.keys())[-1]
+            post_status[last_post] = ['Day12', 'Night12']
 
-    for post in c_only_posts:
-        post_plan[post] = ["C"]
-        shift_demand["C"] += 1
-
-    # Add common posts for males
-    for post in reduced_common_male[::-1]:  # Reverse for converting from bottom
-        post_plan[post] = ["A", "B", "C"]
-        shift_demand["A"] += 1
-        shift_demand["B"] += 1
-        shift_demand["C"] += 1
-
-    # Add common posts for females
-    for post in reduced_common_female[::-1]:
-        post_plan[post] = ["A", "B"]
-        shift_demand["A"] += 1
-        shift_demand["B"] += 1
-
-    return post_plan, shift_demand
-
-# --- 3. OR-TOOLS ASSIGNMENT ---
-def assign_with_ortools():
-    post_plan, shift_demand = create_post_plan()
-    people = [n for n, _, _ in names_data]
-    model = cp_model.CpModel()
-    shifts = ["A", "B", "C", "Day12", "Night12", "G-M", "G-F", "G-Tech", "Off"]
-    shift_vars = {(p, s): model.NewBoolVar(f"{p}_{s}") for p in people for s in shifts}
-
-    # One shift per person
-    for p in people:
-        model.AddExactlyOne(shift_vars[p, s] for s in shifts)
-
-    # Shift demand constraints
-    for s, cnt in shift_demand.items():
-        model.Add(sum(shift_vars[p, s] for p in people) == cnt)
-
-    # Previous day constraint
-    for p in people:
-        prev = prev_shift_map.get(p, "")
-        if prev in ["C", "Night12"]:
-            for s in ["A", "Day12", "G-M", "G-F", "G-Tech"]:
-                model.Add(shift_vars[p, s] == 0)
-
-    # Weekly history constraints
-    flags = []
-    male_count = len([n for n, g, _ in names_data if g == 'M'])
-    for p in people:
-        wc = weekly_counts[p]
-        total_night = model.NewIntVar(0, 10, f"night_{p}")
-        total_12hr = model.NewIntVar(0, 10, f"day12_{p}")
-        model.Add(total_night == wc["C"] + wc["Night12"] + shift_vars[p,"C"] + shift_vars[p,"Night12"])
-        model.Add(total_12hr == wc["Day12"] + wc["Night12"] + shift_vars[p,"Day12"] + shift_vars[p,"Night12"])
-        model.Add(total_12hr <= 3)
-        flag = model.NewBoolVar(f"flag_{p}")
-        gt3 = model.NewBoolVar(f"gt3_{p}")
-        model.Add(total_night > 3).OnlyEnforceIf(gt3)
-        model.Add(total_night <= 3).OnlyEnforceIf(gt3.Not())
-        model.Add(flag == 1).OnlyEnforceIf(gt3)
-        model.Add(flag == 0).OnlyEnforceIf(gt3.Not())
-        flags.append(flag)
-    model.Add(sum(flags) <= max(1, int(male_count * 0.10)))
-
-    # Eligibility constraints
-    for p, g, t in names_data:
-        if g == "F":
-            model.Add(shift_vars[p, "C"] == 0)
-            model.Add(shift_vars[p, "Night12"] == 0)
-        if not t:
-            model.Add(shift_vars[p, "G-Tech"] == 0)
-
-    # Off shift definition
-    for p in people:
-        model.Add(shift_vars[p, "Off"] == 1).OnlyEnforceIf([
-            shift_vars[p, s].Not() for s in shifts if s != "Off"
-        ])
-
-    # Solve
-    solver = cp_model.CpSolver()
-    solver.parameters.random_seed = random.randint(0, 10000)
-    status = solver.Solve(model)
-
-    if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        assignment = {}
-        for p in people:
+        for post, shifts in post_status.items():
             for s in shifts:
-                if solver.Value(shift_vars[p, s]):
-                    assignment[p] = s
-        return assignment, post_plan
-    else:
-        return None, None
+                if males:
+                    person = males.pop(0)
+                    person_roles[person] = 'CommonM'
+                    post_assignments[f"{post}_{s}"] = (person, s)
 
-# --- 4. OUTPUT ---
-if st.button("Generate Schedule") and names_data:
-    result, post_plan = assign_with_ortools()
-    if result:
-        st.success("✅ Schedule generated successfully!")
+        # --- Display ---
+        st.subheader("📋 Final Schedule")
+        for post, (person, shift) in post_assignments.items():
+            st.text(f"{post:25s} --> {person:15s} | Shift: {shift}")
 
-        shift_to_people = defaultdict(list)
-        for p, s in result.items():
-            shift_to_people[s].append(p)
-
+        # --- Download as Word File ---
         doc = Document()
-        doc.add_heading("Shift Schedule by Post", 0)
-        for post, shifts in post_plan.items():
-            doc.add_paragraph(post, style='Heading 2')
-            for s in shifts:
-                if shift_to_people[s]:
-                    person = shift_to_people[s].pop()
-                    doc.add_paragraph(f"Shift {s}: {person}", style='List Bullet')
+        doc.add_heading("Shift Schedule", 0)
+        for post, (person, shift) in post_assignments.items():
+            doc.add_paragraph(f"{post} --> {person} | Shift: {shift}")
+
         buffer = io.BytesIO()
         doc.save(buffer)
-        st.download_button("Download Word Schedule", buffer.getvalue(), file_name="Shift_Schedule.docx",
-                           mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-    else:
-        st.error("❌ Could not generate a feasible schedule. Relax some constraints or increase staff.")
+        buffer.seek(0)
+        st.download_button("Download Schedule as Word", buffer, file_name="shift_schedule.docx")
