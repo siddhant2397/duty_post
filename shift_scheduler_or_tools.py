@@ -340,6 +340,9 @@ if file:
         if not conflicts.empty:
             st.warning("Persons assigned both shifts and OFF on same day found:")
             st.dataframe(conflicts)
+        else:
+            st.warning("Empty")
+        
 
         if not df_off.empty:
             st.subheader("OFF Assignments")
