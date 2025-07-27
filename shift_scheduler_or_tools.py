@@ -169,8 +169,11 @@ def solve_with_ortools(post_plan, shift_demand):
         model.Add(total_12hr <= 3)
 
         flag = model.NewBoolVar(f"flag_{p}")
-        model.Add(flag == 1).OnlyEnforceIf(total_night > 3)
-        model.Add(flag == 0).OnlyEnforceIf(total_night <= 3)
+        gt3 = model.NewBoolVar(f"gt3_{p}")
+        model.Add(total_night > 3).OnlyEnforceIf(gt3)
+        model.Add(total_night <= 3).OnlyEnforceIf(gt3.Not())
+        model.Add(flag == 1).OnlyEnforceIf(gt3)
+        model.Add(flag == 0).OnlyEnforceIf(gt3.Not())
         flags.append(flag)
     model.Add(sum(flags) <= max_4_allowed)
 
