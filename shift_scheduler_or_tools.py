@@ -348,6 +348,13 @@ if file:
             st.subheader("OFF Assignments")
             st.dataframe(df_off.sort_values(by=["Day", "Name"]))
             st.download_button("Download OFF Assignments CSV", df_off.to_csv(index=False), "off_assignments.csv")
+        st.write(f"Merge iteration {merge_idx}, applied merges: {applied_merges}")
+        st.write("Merged priority list:", m_priority_list)
+        st.write("Number of merged posts:", num_merged_posts)
+        st.write(f"Converting {num_convert_12h} posts to 12-hour shifts.")
+        eight_hr_posts, twelve_hr_posts = convert_priority_list_to_shifts(m_priority_list, max_8h_posts - num_convert_12h)
+        st.write("8-hour shifts posts:", eight_hr_posts)
+        st.write("12-hour shifts posts:", twelve_hr_posts)
 
         # Download shift assignments as CSV (flattened)
         df_assign = pd.DataFrame(assigned_records, columns=["Name", "Post", "Day", "Shift"])
