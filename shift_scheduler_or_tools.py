@@ -349,8 +349,8 @@ if file:
                     }
                     solution_info = f"Used full merges and converted {num_convert_12h} posts to 12h shifts."
                     break
-            if feasible_solution is not None:
-                break
+                if feasible_solution is not None:
+                    break
 
         if feasible_solution is None:
             st.error("No feasible schedule found after merging and conversions. Try adjusting inputs.")
