@@ -347,7 +347,7 @@ if file:
             st.download_button("Download OFF Assignments CSV", df_off.to_csv(index=False), "off_assignments.csv")
 
         # Download shift assignments as CSV (flattened)
-        df_assign = pd.DataFrame(assign_records, columns=["Name", "Post", "Day", "Shift"])
+        df_assign = pd.DataFrame(assigned_records, columns=["Name", "Post", "Day", "Shift"])
         st.download_button("Download Shift Assignments CSV", df_assign.to_csv(index=False), "shift_assignments.csv")
 
 else:
