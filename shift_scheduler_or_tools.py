@@ -473,7 +473,7 @@ if file:
         st.write("Merged priority list:", m_priority_list)
         st.write("Number of merged posts:", num_merged_posts)
         st.write(f"Converting {num_convert_12h} posts to 12-hour shifts.")
-        eight_hr_posts, twelve_hr_posts = convert_priority_list_to_shifts(m_priority_list, max_8h_posts - num_convert_12h)
+        eight_hr_posts, twelve_hr_posts = convert_priority_list_to_shifts(m_priority_list, num_merged_posts - num_convert_12h)
         st.write("8-hour shifts posts:", eight_hr_posts)
         st.write("12-hour shifts posts:", twelve_hr_posts)
 
