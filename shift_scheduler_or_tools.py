@@ -72,12 +72,25 @@ if file:
         height=150,
         help="Example:\nMCom2,MCom3\nMCom5,MCom6"
     ).strip().splitlines()
+#change
+    last_day_shift_text = st.text_area(
+        "Enter previous day's shift for each staff (Name, Shift), one per line (e.g., Alice,C)",
+        height=150,
+        help="Helps enforce no A or Day shift immediately after C or Night on first scheduling day"
+    )
 
     merge_groups = []
     for line in merge_lines:
         group = [p.strip() for p in line.split(",") if p.strip()]
         if len(group) > 1:
             merge_groups.append(group)
+#change
+    last_day_shift_map = {}
+    for line in last_day_shift_text.strip().split("\n"):
+        if ',' in line:
+            name, shift = line.split(",", 1)
+            last_day_shift_map[name.strip()] = shift.strip()
+
 
     if st.button("Generate Schedule"):
 
@@ -175,6 +188,16 @@ if file:
                 model.AddExactlyOne([X[p, slot_id] for p in elig])
 
             all_shifts = shifts8 + shifts12 + ["General"]
+            #change
+            for p in staff.index:
+                person_name = staff.loc[p, "Name"]
+                prev_shift = last_day_shift_map.get(person_name)
+                if prev_shift is not None and prev_shift in ("C", "Night", "NightShift", "Night12"):
+                    forbidden_slots = [sid for sid, (post, day_, shift_, elig_) in enumerate(slot_list)
+                                      if day_ == 0 and shift_ in ("A", "Day12") and p in elig_]
+                    for sid in forbidden_slots:
+                        model.Add(X[p, sid] == 0) #tillhere
+
             for p in staff.index:
                 for day in range(num_days):
                     slots_same_day = [sid for sid, (_, day_, shift_, elig_) in enumerate(slot_list)
@@ -290,6 +313,16 @@ if file:
 
                 for slot_id, (_, _, _, elig) in enumerate(slot_list):
                     model.AddExactlyOne([X[p, slot_id] for p in elig])
+#change
+                for p in staff.index:
+                    person_name = staff.loc[p, "Name"]
+                    prev_shift = last_day_shift_map.get(person_name)
+                    if prev_shift is not None and prev_shift in ("C", "Night", "NightShift", "Night12"):
+                        forbidden_slots = [sid for sid, (post, day_, shift_, elig_) in enumerate(slot_list)
+                                          if day_ == 0 and shift_ in ("A", "Day12") and p in elig_]
+                        for sid in forbidden_slots:
+                            model.Add(X[p, sid] == 0) #tillhere
+
 
                 for p in staff.index:
                     for day in range(num_days):
