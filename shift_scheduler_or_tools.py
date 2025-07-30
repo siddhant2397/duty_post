@@ -212,7 +212,7 @@ if file:
                                if shift_ in ("C", "Night12") and p in elig_]
                 tot_nights = model.NewIntVar(0, num_days, f"nightcount_{names[p]}")
                 model.Add(tot_nights == sum(X[p, sid] for sid in night_slots))
-                model.Add(tot_nights <= 3 + extra_night_staff[idx] * num_days)
+                model.Add(tot_nights <= 3 + extra_night_staff[idx])
             model.Add(sum(extra_night_staff) <= n_staff_10pc)
 
             for p in staff.index:
@@ -338,7 +338,7 @@ if file:
                                    if shift_ in ("C", "Night12") and p in elig_]
                     tot_nights = model.NewIntVar(0, num_days, f"nightcount_{names[p]}")
                     model.Add(tot_nights == sum(X[p, sid] for sid in night_slots))
-                    model.Add(tot_nights <= 3 + extra_night_staff[idx] * num_days)
+                    model.Add(tot_nights <= 3 + extra_night_staff[idx])
                 model.Add(sum(extra_night_staff) <= n_staff_10pc)
 
                 for p in staff.index:
